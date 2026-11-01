@@ -28,6 +28,8 @@ struct ShortTxConfig {
   // ranges[PERSON_TYPE].getLeft().  nullptr for the random graph.
   const LdbcGraph* ldbc = nullptr;
   uint32_t first_node = 0;
+  // BoMB: S2 for a read-only draw, S1 otherwise; the long transaction is L1.
+  const struct BombGraph* bomb = nullptr;
 };
 
 class ShortTx : public Tx {

@@ -37,6 +37,13 @@ public:
   // Alg.1 l.15 ReserveWrite (Java prepareUpdate).  Takes ownership of `key`.
   virtual void reserve_write(std::vector<RWKey*>& ws, RWKey* key,
                              ResourceType type, int64_t id) = 0;
+  // Alg.1 l.17-18 ReserveMammothRead (only the r2 long transaction uses it).
+  virtual void reserve_mammoth_read(std::vector<RWKey*>&, RWKey*, ResourceType,
+                                    int64_t, LongRunningState) {}
+  // Move the mammoth state of a record it wrote in an earlier epoch forward
+  // (PENDING_WRITE -> VISITED once the write is installed), without writing it
+  // again (only the BoMB L1 uses it).
+  virtual void mark_mammoth_write(ResourceType, int64_t, LongRunningState) {}
   // Alg.1 l.19 ReserveMammothWrite (Java prepareLongRunningUpdate).
   virtual void reserve_mammoth_write(std::vector<RWKey*>& ws, RWKey* key,
                                      ResourceType type, int64_t id,

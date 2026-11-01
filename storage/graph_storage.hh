@@ -55,6 +55,10 @@ public:
     degrees_[to].store(pt + 1, std::memory_order_relaxed);
   }
   void access_node(int32_t node_id) {  // accesses.merge(id, 1, Integer::sum)
+    // --fix_qsbr_retire_pin: the main thread (q2_prepare, loading) and the
+    // long-running clients (mammoth constructors) reach this map too; they
+    // are online only here.  No-op for workers and when the fix is off.
+    Qsbr::Section qsbr_section;
     accesses_.merge(
         node_id, [] { return int32_t{1}; }, [](int32_t v) { return v + 1; });
   }

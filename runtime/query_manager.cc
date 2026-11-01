@@ -1,5 +1,6 @@
 #include "runtime/query_manager.hh"
 
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -59,6 +60,19 @@ Task* QueryManager::get_next() {
         g_diag_put_back.v.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
       }
+    }
+    if (task != nullptr && mode == 1 && FLAGS_fix_mode_switch_race &&
+        task->tx->is_two_pl()) {
+      // Port fix #8 (2026-10-30): a 2PL task queued before the switch to
+      // epochs goes to the pending queue without touching the epoch's work
+      // counter.  Taking a slot and giving it back (below) let a concurrent
+      // poll of the mammoth see the counter below zero and abort the process
+      // ("All long-running tasks must have been scheduled"); one mammoth back
+      // to back with one-shot slices switches modes hundreds of times a second.
+      g_diag_2pl_converted.v.fetch_add(1, std::memory_order_relaxed);
+      g_diag_2pl_in_epoch.v.fetch_add(1, std::memory_order_relaxed);
+      submit(task);
+      return nullptr;
     }
     if (task != nullptr && mode == 1) {
       task->tx->set_epoch(epoch_.load());
@@ -134,6 +148,9 @@ void QueryManager::change_execution_mode(Task* task, int epoch) {
 
 // scheduleLongRunningTask / scheduleSingleLongRunningTask.
 void QueryManager::schedule_long_running_task() {
+  // --lr_repeat: the previous mammoth's table clear (not awaited) must finish
+  // before this mammoth or any epoch transaction reserves.  No-op for one mammoth.
+  join_background();
   Task* lr = long_running_queries_.poll();
   auto* lr_tx = static_cast<AllNodesLongRunningTx*>(lr->tx);
   if (FLAGS_tag_optimization) {  // setupReservationTable
@@ -157,10 +174,19 @@ void QueryManager::schedule_long_running_task() {
 
 void QueryManager::check_long_running_tasks() {
   bool found = false;
-  running_queries_.for_each([&](Task* t) {
-    if (t->long_running) found = true;
-    return !found;
-  });
+  // A worker that polled with a stale (epoch, mode) holds the mammoth briefly
+  // before putting it back (get_next, --fix_getnext_race); with the very short
+  // epochs of an interactive mammoth that waits for its client, the check can
+  // fall into that window.  Wait for the put-back before giving up.
+  auto t0 = std::chrono::steady_clock::now();
+  for (;;) {
+    running_queries_.for_each([&](Task* t) {
+      if (t->long_running) found = true;
+      return !found;
+    });
+    if (found || std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(100)) break;
+    park_nanos_1();
+  }
   if (!found) {
     std::fprintf(stderr, "Not all expected long-running txs are present\n");
     std::abort();
@@ -213,6 +239,11 @@ void QueryManager::schedule_in_epochs() {
                 "at the switch: %" PRIu64 ")\n", lr_end_epoch_.load(),
                 inflight);
     std::fflush(stdout);
+    // --lr_repeat: every mammoth goes back through reset_execution_mode, as a
+    // single mammoth does.  Scheduling the next one directly would leave the
+    // last epoch's aborted tasks in running_queries_ (the drain above waits
+    // for them forever) and the previous mammoth's states in the table.
+    if (FLAGS_lr_repeat) break;
   }
 }
 
@@ -230,6 +261,10 @@ void QueryManager::reset_execution_mode() {
     convert_to_two_pl(t);
     return true;
   });
+  // --lr_repeat: the tasks aborted in the last epoch's phase 2 now run under
+  // 2PL, so they must not inflate the next mammoth's first epoch count (that
+  // epoch would wait for tasks that never come).  No-op for one mammoth.
+  aborted_counter_.store(0);
   // scheduleParallelResetTasks: CORES - 1 = 3 threads move pending tasks.
   std::vector<std::thread> movers;
   for (int i = 0; i < 3; ++i)
@@ -243,6 +278,7 @@ void QueryManager::reset_execution_mode() {
     });
   for (auto& m : movers) m.join();
   // executor.execute(() -> reservationTable.clear()): not awaited.
+  join_background();  // --lr_repeat: a joinable thread must not be reassigned
   clear_thread_ = std::thread([this] {
     double c0 = now_millis();
     table_->clear();

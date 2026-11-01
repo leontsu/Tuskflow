@@ -35,6 +35,17 @@ public:
     // `hasReserved |= ...` starts at true, so it never becomes false (kept).
     has_reserved_ |= table_->merge_write(type, id, static_cast<int>(tid_), epoch_);
   }
+  // Alg.1 l.17-18.
+  void reserve_mammoth_read(std::vector<RWKey*>& rs, RWKey* key,
+                            ResourceType type, int64_t id,
+                            LongRunningState state) override {
+    *key = RWKey{epoch_, id, type, nullptr, nullptr};
+    rs.push_back(key);
+    table_->merge_mammoth_read(type, id, state, epoch_);
+  }
+  void mark_mammoth_write(ResourceType type, int64_t id, LongRunningState state) override {
+    table_->merge_mammoth_write(type, id, state, epoch_);
+  }
   // Alg.1 l.19-20.
   void reserve_mammoth_write(std::vector<RWKey*>& ws, RWKey* key,
                              ResourceType type, int64_t id,
